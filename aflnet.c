@@ -796,6 +796,91 @@ region_t* extract_requests_ipp(unsigned char* buf, unsigned int buf_size, unsign
   return regions;
 }
 
+// .......................................MQTT PROTOCOL..................................................
+region_t* extract_requests_mqtt(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref){
+    char *mem;
+    //unsigned int byte_count = 0;
+    unsigned int mem_count = 0;
+    unsigned int mem_size = 1024;
+    unsigned int region_count = 0;
+    unsigned int cur_start = 0;
+    unsigned int cur_end = 0;
+
+    region_t *regions = NULL;
+
+    // Packet headers for request messages from client
+    //char start[1]={0x20};
+    //char start2[1]={0x82};
+    //char start3[1]={0xC0};
+    //char start4[1]={0xE0};
+    //char start5[1]={0x30};
+    //char start6[1]={0x31};
+
+    mem=(char *)ck_alloc(mem_size);
+
+    // Read till EOF for the request messages  读取至EOF的请求信息
+    while(cur_start < buf_size){
+        // If only a single byte with packet header is present create a region and break
+        // 如果只有一个带数据包头的字节存在，则创建一个区域并中断
+        if((buf_size - cur_start) == 1){
+            region_count++;
+            regions = (region_t *)ck_realloc(regions, region_count * sizeof(region_t));
+            regions[region_count - 1].start_byte = cur_start;
+            regions[region_count - 1].end_byte = buf_size - 1;
+            regions[region_count - 1].state_sequence = NULL;
+            regions[region_count - 1].state_count = 0;
+
+            break;
+        }
+
+        // Read the packet header 读取数据包的头部
+        memcpy(&mem[mem_count], buf + cur_start, 2);
+        cur_start = cur_start + 2;
+
+        // check the packet length and update current end
+        // 检查数据包的长度并更新当前的端点
+        if (mem[1] >= 0)
+            cur_end = cur_start + mem[1] - 1;
+        else
+            cur_end = buf_size;
+
+        // Cretate a region for every request
+        //为每个请求建立一个区域
+        region_count++;
+        regions = (region_t *)ck_realloc(regions, region_count * sizeof(region_t));
+        regions[region_count - 1].start_byte = cur_start - 2;
+        regions[region_count - 1].end_byte = cur_end;
+        regions[region_count - 1].state_sequence = NULL;
+        regions[region_count - 1].state_count = 0;
+
+        // update the indices 更新索引
+        mem_count = 0;
+        cur_start = cur_end + 1;
+        cur_end = cur_start;
+    }
+
+    if (mem) ck_free(mem);
+
+    //in case region_count equals zero, it means that the structure of the buffer is broken
+    //如果region_count等于0，这意味着缓冲区的结构被破坏了
+    //hence we create one region for the whole buffer
+    //因此，我们为整个缓冲区创建一个区域
+    if ((region_count == 0) && (buf_size > 0)) {
+        regions = (region_t *)ck_realloc(regions, sizeof(region_t));
+        regions[0].start_byte = 0;
+        regions[0].end_byte = buf_size - 1;
+        regions[0].state_sequence = NULL;
+        regions[0].state_count = 0;
+        region_count = 1;
+    }
+
+    *region_count_ref = region_count;
+    return regions;
+}
+
+//................................END MQTT REQUEST..................................................
+
+
 unsigned int* extract_response_codes_smtp(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref)
 {
   char *mem;
@@ -1501,6 +1586,72 @@ unsigned int* extract_response_codes_ipp(unsigned char* buf, unsigned int buf_si
   *state_count_ref = state_count;
   return state_sequence;
 }
+
+/*.......................................START MQTT RESPONSE........................................................
+ * Function to prase responses received from the MQTT broker*/
+unsigned int* extract_response_codes_mqtt(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref){
+    char *mem;
+    unsigned int byte_count = 0;
+    unsigned int mem_count = 0;
+    unsigned int mem_size = 1024;
+    unsigned int *state_sequence = NULL;
+    unsigned int state_count = 0;
+
+    // Packet headers for MQTT broker responses
+    // MQTT代理响应的数据包头
+    char start1[1]={0x20};
+    char start2[1]={0x30};
+    char start3[1]={0x90};
+    char start4[1]={0xD0};
+    char start5[1]={0x31};
+
+    mem=(char *)ck_alloc(mem_size);
+
+    // Initial state of the response state machine
+    // 响应状态机的初始状态
+    state_count++;
+    state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
+    state_sequence[state_count - 1] = 0;
+
+    // Read till EOF received from the broker
+    while (byte_count < buf_size) {
+
+        // Copy the packet header to get the message type
+        memcpy(&mem[mem_count++], buf + byte_count++, 1);
+        memcpy(&mem[mem_count], buf + byte_count++, 1);
+
+        // Determine if it's a response packet
+        if ((mem_count > 0) && ((memcmp(&mem[0], start2, 1) == 0) || (memcmp(&mem[0], start1, 1) == 0) || (memcmp(&mem[0], start3, 1) == 0) || (memcmp(&mem[0], start4, 1) == 0) || (memcmp(&mem[0], 			start5, 1) == 0))) {
+
+            // Get the state name from the packet
+            unsigned char message_code = (unsigned char)mem[0];
+
+            // Do not create new states if the recieved packet belongs to initial state
+            if (message_code == 0) break;
+
+            // Create a new state
+            state_count++;
+            state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
+            state_sequence[state_count - 1] = message_code;
+            mem_count = 0;
+            byte_count = byte_count+mem[1]-1;
+        }
+        else {
+            mem_count++;
+
+            if (mem_count == mem_size) {
+                //enlarge the mem buffer
+                mem_size = mem_size * 2;
+                mem=(char *)ck_realloc(mem, mem_size);
+            }
+        }
+    }
+    if (mem) ck_free(mem);
+    *state_count_ref = state_count;
+    return state_sequence;
+}
+//.......................... END OF MQTT RESPONSE..............................
+
 
 // kl_messages manipulating functions
 
